@@ -12,6 +12,9 @@ func main() {
     //run database
     configs.ConnectDB()
 
+    //connect to redis
+    configs.InitRedis()
+
     //routes
     routes.UserRoute(app) 
 

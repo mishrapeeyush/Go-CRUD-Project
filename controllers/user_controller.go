@@ -6,12 +6,13 @@ import (
     "fiber-mongo-api/responses"
     "net/http"
     "time"
-
     "github.com/go-playground/validator/v10"
     "github.com/gofiber/fiber/v2"
     "go.mongodb.org/mongo-driver/bson"
     "go.mongodb.org/mongo-driver/bson/primitive"
     "go.mongodb.org/mongo-driver/mongo"
+    "fmt"
+    "encoding/json"
 )
 
 var userCollection *mongo.Collection = configs.GetCollection(configs.DB, "users")
@@ -49,19 +50,43 @@ func CreateUser(c *fiber.Ctx) error {
 }
 
 func GetAUser(c *fiber.Ctx) error {
-    ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-    userId := c.Params("userId")
-    var user models.User
-    defer cancel()
+	// Check if user details are present in Redis cache
+	userId := c.Params("userId")
+	cacheKey := "user_" + userId
+	cacheResult, err := configs.RedisClient.Get(context.Background(), cacheKey).Result()
+	if err == nil {
+		// User details found in cache, return from cache
+		var cachedUser models.User
+		if err := json.Unmarshal([]byte(cacheResult), &cachedUser); err != nil {
+			return c.Status(http.StatusInternalServerError).JSON(responses.ErrorResponse{Status: http.StatusInternalServerError, Message: "error", Error: &fiber.Map{"data": err.Error()}})
+		}
+		return c.Status(http.StatusOK).JSON(responses.UserResponse{Status: http.StatusOK, Message: "success", Data: &fiber.Map{"data": cachedUser}})
+	}
 
-    objId, _ := primitive.ObjectIDFromHex(userId)
+	// User details not found in cache, fetch from MongoDB
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 
-    err := userCollection.FindOne(ctx, bson.M{"id": objId}).Decode(&user)
-    if err != nil {
-        return c.Status(http.StatusInternalServerError).JSON(responses.ErrorResponse{Status: http.StatusInternalServerError, Message: "error", Error: &fiber.Map{"data": err.Error()}})
-    } 
+	userCollection := configs.GetCollection(configs.DB, "users")
 
-    return c.Status(http.StatusOK).JSON(responses.UserResponse{Status: http.StatusOK, Message: "success", Data: &fiber.Map{"data": user}})
+	objId, _ := primitive.ObjectIDFromHex(userId)
+	var user models.User
+	err = userCollection.FindOne(ctx, bson.M{"id": objId}).Decode(&user)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(responses.ErrorResponse{Status: http.StatusInternalServerError, Message: "error", Error: &fiber.Map{"data": err.Error()}})
+	}
+
+	// Store user details in Redis cache
+	userJSON, err := json.Marshal(user)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(responses.ErrorResponse{Status: http.StatusInternalServerError, Message: "error", Error: &fiber.Map{"data": err.Error()}})
+	}
+	err = configs.RedisClient.Set(context.Background(), cacheKey, userJSON, 24*time.Hour).Err()
+	if err != nil {
+		fmt.Println("Failed to set user details in Redis:", err)
+	}
+
+	return c.Status(http.StatusOK).JSON(responses.UserResponse{Status: http.StatusOK, Message: "success", Data: &fiber.Map{"data": user}})
 }
 
 func EditAUser(c *fiber.Ctx) error {
